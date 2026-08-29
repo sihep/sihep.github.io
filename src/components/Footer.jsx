@@ -60,10 +60,6 @@ export default function Footer() {
             <span style={{ color: 'var(--paper-dim)' }}>LiSAM — Segment Anything, LiDAR</span>
           </div>
           <div>
-            <span style={{ color: 'var(--steel)', display: 'block', marginBottom: 8 }}>ORIGIN</span>
-            <span style={{ color: 'var(--paper-dim)' }}>DRDO · Advanced Sensing &amp; AI Division</span>
-          </div>
-          <div>
             <span style={{ color: 'var(--steel)', display: 'block', marginBottom: 8 }}>STATUS</span>
             <span style={{ color: 'var(--paper-dim)' }}>Design Proposal — Not Deployed</span>
           </div>
