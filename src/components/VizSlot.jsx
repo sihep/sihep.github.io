@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
 
-const SCAN_URL = 'https://sihep.github.io/assets/000008.bin';
+const SCAN_URL = 'https://raw.githubusercontent.com/sihep/sihep.github.io/main/assets/000008.bin';
 
 /* ------------------------------------------------------------------ */
 /* Color ramp — deep steel -> teal -> mint -> amber (elevation-mapped) */
