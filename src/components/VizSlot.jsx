@@ -722,8 +722,8 @@ export default function LidarPointCloud({ height = '100vh' }) {
       // WASD panning
       if (keyMap.w) target.addScaledVector(fwd, s * delta);
       if (keyMap.s) target.addScaledVector(fwd, -s * delta);
-      if (keyMap.d) target.addScaledVector(right, -s * delta);
-      if (keyMap.a) target.addScaledVector(right, s * delta);
+      if (keyMap.d) target.addScaledVector(right, s * delta);
+      if (keyMap.a) target.addScaledVector(right, -s * delta);
       if (keyMap.q) target.y += s * delta;
       if (keyMap.e) target.y -= s * delta;
 
