@@ -1,6 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
 
+const SCAN_URL = 'https://sihep.github.io/assets/000008.bin';
+
 /* ------------------------------------------------------------------ */
 /* Color ramp — deep steel -> teal -> mint -> amber (elevation-mapped) */
 /* ------------------------------------------------------------------ */
@@ -23,115 +25,113 @@ function sampleHeightColor(t, out) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Procedural "scan" — ground haze + scanned building facades + silos */
-/* (optimised: fewer points, fewer structures)                       */
+/* Real scan loader — KITTI-style Velodyne .bin                       */
+/* Stride 4 float32 records: [x, y, z, intensity], sensor frame z-up. */
+/* Converted to three.js y-up: (x, z, -y). Sensor origin is (0,0,0),  */
+/* so the cloud is naturally centered near the vehicle.               */
+/* Fetched at runtime from a remote URL rather than being embedded.   */
 /* ------------------------------------------------------------------ */
-function generateSceneData(count) {
-  const R = 42;
-  const maxH = 16;
-  const positions = new Float32Array(count * 3);
-  const colors = new Float32Array(count * 3);
-  const sizes = new Float32Array(count);
-  const tmp = new THREE.Color();
-  let idx = 0;
+async function fetchScanBuffer(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Failed to fetch scan (${res.status} ${res.statusText})`);
+  return res.arrayBuffer();
+}
 
-  function push(x, y, z, base) {
-    if (idx >= count) return;
+function parseVelodyneBin(buffer) {
+  const floats = new Float32Array(buffer);
+  const n = floats.length;
+  const count = Math.floor(n / 4);
+
+  const positions = new Float32Array(count * 3);
+  const rawIntensity = new Float32Array(count);
+
+  let minX = Infinity, maxX = -Infinity;
+  let minY = Infinity, maxY = -Infinity;
+  let minZ = Infinity, maxZ = -Infinity;
+
+  for (let idx = 0; idx < count; idx++) {
+    const rx = floats[idx * 4];
+    const ry = floats[idx * 4 + 1];
+    const rz = floats[idx * 4 + 2];
+    let iv = floats[idx * 4 + 3];
+    if (!Number.isFinite(iv)) iv = 0;
+    iv = iv > 1 ? Math.min(1, iv / 255) : Math.max(0, iv);
+
+    // sensor frame is z-up (x fwd, y left, z up) -> three.js y-up
+    const x = rx, y = rz, z = -ry;
+
     positions[idx * 3] = x;
     positions[idx * 3 + 1] = y;
     positions[idx * 3 + 2] = z;
-    sampleHeightColor(Math.max(0, y) / maxH, tmp);
-    colors[idx * 3] = tmp.r;
-    colors[idx * 3 + 1] = tmp.g;
-    colors[idx * 3 + 2] = tmp.b;
-    sizes[idx] = base * (0.6 + Math.random() * 0.6);
-    idx++;
+    rawIntensity[idx] = iv;
+
+    if (x < minX) minX = x; if (x > maxX) maxX = x;
+    if (y < minY) minY = y; if (y > maxY) maxY = y;
+    if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
   }
 
-  // ground haze (reduced ratio)
-  const groundCount = Math.floor(count * 0.30);
-  for (let i = 0; i < groundCount; i++) {
-    const r = Math.sqrt(Math.random()) * R;
-    const a = Math.random() * Math.PI * 2;
-    const x = Math.cos(a) * r, z = Math.sin(a) * r;
-    const y = Math.sin(x * 0.15) * 0.35 + Math.cos(z * 0.18) * 0.35 + (Math.random() - 0.5) * 0.15;
-    push(x, Math.max(y, 0), z, 1.4);
+  return {
+    positions, rawIntensity, count,
+    bounds: { minX, maxX, minY, maxY, minZ, maxZ },
+  };
+}
+
+function buildSceneDataFromScan(scan) {
+  const { positions, rawIntensity, count, bounds } = scan;
+  const colors = new Float32Array(count * 3);
+  const sizes = new Float32Array(count);
+  const tmp = new THREE.Color();
+
+  const yRange = Math.max(1e-6, bounds.maxY - bounds.minY);
+
+  for (let i = 0; i < count; i++) {
+    const y = positions[i * 3 + 1];
+    const t = (y - bounds.minY) / yRange;
+    sampleHeightColor(t, tmp);
+    colors[i * 3] = tmp.r;
+    colors[i * 3 + 1] = tmp.g;
+    colors[i * 3 + 2] = tmp.b;
+    sizes[i] = 1.15 + rawIntensity[i] * 0.9;
   }
 
-  // scanned structures (fewer buildings, lower per-building budget)
-  const buildings = [];
-  for (let b = 0; b < 4; b++) { // was 6
-    buildings.push({
-      bx: (Math.random() - 0.5) * R * 1.3,
-      bz: (Math.random() - 0.5) * R * 1.3,
-      bw: 4 + Math.random() * 6,
-      bd: 4 + Math.random() * 6,
-      bh: 4 + Math.random() * 12,
-    });
-  }
-  buildings.push({ bx: 2, bz: -4, bw: 5, bd: 5, bh: 16 }); // landmark tower
+  const cx = (bounds.minX + bounds.maxX) / 2;
+  const cz = (bounds.minZ + bounds.maxZ) / 2;
+  const spanX = bounds.maxX - bounds.minX;
+  const spanZ = bounds.maxZ - bounds.minZ;
+  const R = Math.max(spanX, spanZ) / 2 * 1.05;
+  const maxH = bounds.maxY - bounds.minY;
 
-  const buildingBudget = Math.floor(count * 0.45);
-  const perBuilding = Math.floor(buildingBudget / buildings.length);
-  buildings.forEach(({ bx, bz, bw, bd, bh }) => {
-    for (let i = 0; i < perBuilding; i++) {
-      const face = Math.floor(Math.random() * 5);
-      let x, y, z;
-      if (face === 4) { x = bx + (Math.random() - 0.5) * bw; z = bz + (Math.random() - 0.5) * bd; y = bh + (Math.random() - 0.5) * 0.1; }
-      else if (face === 0) { x = bx - bw / 2; z = bz + (Math.random() - 0.5) * bd; y = Math.random() * bh; }
-      else if (face === 1) { x = bx + bw / 2; z = bz + (Math.random() - 0.5) * bd; y = Math.random() * bh; }
-      else if (face === 2) { x = bx + (Math.random() - 0.5) * bw; z = bz - bd / 2; y = Math.random() * bh; }
-      else { x = bx + (Math.random() - 0.5) * bw; z = bz + bd / 2; y = Math.random() * bh; }
-      push(x, y, z, 1.2);
-    }
-  });
-
-  // silos / tanks (fewer)
-  const silos = [];
-  for (let s = 0; s < 2; s++) { // was 3
-    silos.push({
-      cx: (Math.random() - 0.5) * R * 1.4,
-      cz: (Math.random() - 0.5) * R * 1.4,
-      rad: 1.2 + Math.random() * 1.3,
-      h: 3 + Math.random() * 6,
-    });
-  }
-  const siloBudget = Math.max(0, count - idx);
-  const perSilo = Math.floor(siloBudget / silos.length);
-  silos.forEach(({ cx, cz, rad, h }) => {
-    for (let i = 0; i < perSilo; i++) {
-      const a = Math.random() * Math.PI * 2;
-      const y = Math.random() * h;
-      push(cx + Math.cos(a) * rad, y, cz + Math.sin(a) * rad, 1.2);
-    }
-  });
-
-  while (idx < count) {
-    const r = Math.sqrt(Math.random()) * R;
-    const a = Math.random() * Math.PI * 2;
-    push(Math.cos(a) * r, 0, Math.sin(a) * r, 1.0);
-  }
-
-  return { positions, colors, sizes, R, maxH };
+  return {
+    positions, colors, sizes,
+    R, maxH,
+    minY: bounds.minY, maxY: bounds.maxY,
+    cx, cz,
+    count,
+  };
 }
 
 /* ------------------------------------------------------------------ */
 /* Rasterize the cloud into a smoothed grid -> the "hazy mesh" haze   */
-/* (grid resolution reduced)                                          */
+/* Handles an off-center bounding box (real scans aren't necessarily  */
+/* symmetric around the origin, unlike the old synthetic scene).      */
 /* ------------------------------------------------------------------ */
-function buildHazyGrid(sceneData, gridRes = 48) { // was 70
-  const { positions, R, maxH } = sceneData;
+function buildHazyGrid(sceneData, gridRes = 56) {
+  const { positions, R, maxH, minY, cx, cz, count } = sceneData;
   const size = gridRes;
   const cell = (2 * R) / (size - 1);
-  const heights = new Float32Array(size * size);
+  const originX = cx - R;
+  const originZ = cz - R;
+  const heights = new Float32Array(size * size).fill(-Infinity);
 
-  const n = positions.length / 3;
-  for (let i = 0; i < n; i++) {
+  for (let i = 0; i < count; i++) {
     const x = positions[i * 3], y = positions[i * 3 + 1], z = positions[i * 3 + 2];
-    const gx = Math.min(size - 1, Math.max(0, Math.round((x + R) / cell)));
-    const gz = Math.min(size - 1, Math.max(0, Math.round((z + R) / cell)));
+    const gx = Math.min(size - 1, Math.max(0, Math.round((x - originX) / cell)));
+    const gz = Math.min(size - 1, Math.max(0, Math.round((z - originZ) / cell)));
     const key = gz * size + gx;
     if (y > heights[key]) heights[key] = y;
+  }
+  for (let i = 0; i < heights.length; i++) {
+    if (!Number.isFinite(heights[i])) heights[i] = minY;
   }
 
   function blur(src) {
@@ -159,9 +159,9 @@ function buildHazyGrid(sceneData, gridRes = 48) { // was 70
   for (let gz = 0; gz < size; gz++) {
     for (let gx = 0; gx < size; gx++) {
       const key = gz * size + gx;
-      const x = -R + gx * cell, z = -R + gz * cell, y = smoothed[key];
+      const x = originX + gx * cell, z = originZ + gz * cell, y = smoothed[key];
       gridPositions[key * 3] = x; gridPositions[key * 3 + 1] = y; gridPositions[key * 3 + 2] = z;
-      sampleHeightColor(Math.max(0, y) / maxH, tmp);
+      sampleHeightColor(Math.max(0, y - minY) / (maxH || 1), tmp);
       gridColors[key * 3] = tmp.r; gridColors[key * 3 + 1] = tmp.g; gridColors[key * 3 + 2] = tmp.b;
     }
   }
@@ -178,8 +178,7 @@ function buildHazyGrid(sceneData, gridRes = 48) { // was 70
 }
 
 function buildSweepGeometry(radius, segments, angleWidth) {
-  // reduced segments
-  segments = Math.min(segments, 32); // cap
+  segments = Math.min(segments, 32);
   const positions = [];
   const colors = [];
   const lead = new THREE.Color('#8fe9df');
@@ -272,7 +271,6 @@ function ToggleBtn({ active, onClick, children }) {
 /* Main component                                                      */
 /* ------------------------------------------------------------------ */
 export default function LidarPointCloud({
-  pointCount = 18000,   // reduced from 45000
   height = '100vh',
 }) {
   const mountRef = useRef(null);
@@ -284,12 +282,16 @@ export default function LidarPointCloud({
   const [showSweep, setShowSweep] = useState(true);
   const [autoRotate, setAutoRotate] = useState(false);
   const [ready, setReady] = useState(false);
+  const [pointCount, setPointCount] = useState(0);
+  const [loadState, setLoadState] = useState('loading'); // 'loading' | 'loaded' | 'error'
+  const [loadError, setLoadError] = useState('');
   const autoRotateRef = useRef(autoRotate);
   useEffect(() => { autoRotateRef.current = autoRotate; }, [autoRotate]);
 
   useEffect(() => {
     const mountEl = mountRef.current;
     if (!mountEl) return;
+    let cancelled = false;
 
     const scene = new THREE.Scene();
     scene.background = new THREE.Color('#0a0e13');
@@ -297,74 +299,18 @@ export default function LidarPointCloud({
 
     const camera = new THREE.PerspectiveCamera(50, 1, 0.1, 500);
     const renderer = new THREE.WebGLRenderer({ antialias: true });
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5)); // cap at 1.5
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
     renderer.domElement.style.display = 'block';
     renderer.domElement.style.touchAction = 'none';
     mountEl.style.touchAction = 'none';
     mountEl.appendChild(renderer.domElement);
 
-    // ---- data ----
-    const sceneData = generateSceneData(pointCount);
-    const grid = buildHazyGrid(sceneData, 48); // reduced resolution
-
-    // ---- points ----
-    const pGeo = new THREE.BufferGeometry();
-    pGeo.setAttribute('position', new THREE.BufferAttribute(sceneData.positions, 3));
-    pGeo.setAttribute('color', new THREE.BufferAttribute(sceneData.colors, 3));
-    pGeo.setAttribute('size', new THREE.BufferAttribute(sceneData.sizes, 1));
-    const pMat = new THREE.ShaderMaterial({
-      vertexShader: POINT_VERT,
-      fragmentShader: POINT_FRAG,
-      transparent: true,
-      depthWrite: false,
-    });
-    const points = new THREE.Points(pGeo, pMat);
-    scene.add(points);
-
-    // ---- hazy derived mesh ----
-    const mGeo = new THREE.BufferGeometry();
-    mGeo.setAttribute('position', new THREE.BufferAttribute(grid.gridPositions, 3));
-    mGeo.setAttribute('color', new THREE.BufferAttribute(grid.gridColors, 3));
-    mGeo.setIndex(grid.indices);
-    const fillMat = new THREE.MeshBasicMaterial({
-      vertexColors: true, transparent: true, opacity: 0.15,
-      blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
-    });
-    const fillMesh = new THREE.Mesh(mGeo, fillMat);
-    const wireMat = new THREE.MeshBasicMaterial({
-      color: 0x6fe3d6, wireframe: true, transparent: true, opacity: 0.22,
-      blending: THREE.AdditiveBlending, depthWrite: false,
-    });
-    const wireMesh = new THREE.Mesh(mGeo, wireMat);
-    wireMesh.position.y += 0.015;
-    const meshGroup = new THREE.Group();
-    meshGroup.add(fillMesh, wireMesh);
-    scene.add(meshGroup);
-
-    // ---- floor grid (reduced divisions) ----
-    const floor = new THREE.GridHelper(96, 24, 0x22404a, 0x152128); // was 48
-    floor.position.y = -0.05;
-    floor.material.transparent = true;
-    floor.material.opacity = 0.45;
-    scene.add(floor);
-
-    // ---- radar sweep (reduced segments) ----
-    const sweepGeo = buildSweepGeometry(sceneData.R * 1.05, 32, Math.PI / 4.2); // was 48
-    const sweepMat = new THREE.MeshBasicMaterial({
-      vertexColors: true, transparent: true, opacity: 0.5,
-      blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
-    });
-    const sweepMesh = new THREE.Mesh(sweepGeo, sweepMat);
-    scene.add(sweepMesh);
-
-    objRef.current = { points, meshGroup, sweepMesh, renderer, camera };
-
-    // ---- custom Google-Maps-style controls (drag pan, right/shift-drag orbit, wheel zoom, pinch) ----
+    // ---- default (pre-data) camera framing, replaced once the scan loads ----
     const target = new THREE.Vector3(0, 3, 0);
     let azimuth = 0.75, polar = 0.95, radius = 58;
-    const initial = { azimuth, polar, radius, target: target.clone() };
+    let initial = { azimuth, polar, radius, target: target.clone() };
     const POLAR_MIN = 0.15, POLAR_MAX = 1.48;
-    const RADIUS_MIN = 8, RADIUS_MAX = 150;
+    let RADIUS_MIN = 8, RADIUS_MAX = 160;
 
     function updateCamera() {
       camera.position.set(
@@ -485,7 +431,8 @@ export default function LidarPointCloud({
       if (autoRotateRef.current) azimuth += delta * 0.14;
       updateCamera();
 
-      if (sweepMesh.visible) sweepMesh.rotation.y -= delta * 0.55;
+      const sweepMesh = objRef.current.sweepMesh;
+      if (sweepMesh && sweepMesh.visible) sweepMesh.rotation.y -= delta * 0.55;
 
       renderer.render(scene, camera);
 
@@ -503,7 +450,101 @@ export default function LidarPointCloud({
     raf = requestAnimationFrame(animate);
     setReady(true);
 
+    // ---- fetch the real scan (000008.bin) over the network and build the scene ----
+    const disposables = [];
+    (async () => {
+      try {
+        const buffer = await fetchScanBuffer(SCAN_URL);
+        if (cancelled) return;
+
+        const scan = parseVelodyneBin(buffer);
+        const sceneData = buildSceneDataFromScan(scan);
+        const grid = buildHazyGrid(sceneData, 56);
+
+        // ---- points ----
+        const pGeo = new THREE.BufferGeometry();
+        pGeo.setAttribute('position', new THREE.BufferAttribute(sceneData.positions, 3));
+        pGeo.setAttribute('color', new THREE.BufferAttribute(sceneData.colors, 3));
+        pGeo.setAttribute('size', new THREE.BufferAttribute(sceneData.sizes, 1));
+        const pMat = new THREE.ShaderMaterial({
+          vertexShader: POINT_VERT,
+          fragmentShader: POINT_FRAG,
+          transparent: true,
+          depthWrite: false,
+        });
+        const points = new THREE.Points(pGeo, pMat);
+        points.visible = showPoints;
+        scene.add(points);
+        disposables.push(pGeo, pMat);
+
+        // ---- hazy derived mesh ----
+        const mGeo = new THREE.BufferGeometry();
+        mGeo.setAttribute('position', new THREE.BufferAttribute(grid.gridPositions, 3));
+        mGeo.setAttribute('color', new THREE.BufferAttribute(grid.gridColors, 3));
+        mGeo.setIndex(grid.indices);
+        const fillMat = new THREE.MeshBasicMaterial({
+          vertexColors: true, transparent: true, opacity: 0.15,
+          blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+        });
+        const fillMesh = new THREE.Mesh(mGeo, fillMat);
+        const wireMat = new THREE.MeshBasicMaterial({
+          color: 0x6fe3d6, wireframe: true, transparent: true, opacity: 0.22,
+          blending: THREE.AdditiveBlending, depthWrite: false,
+        });
+        const wireMesh = new THREE.Mesh(mGeo, wireMat);
+        wireMesh.position.y += 0.015;
+        const meshGroup = new THREE.Group();
+        meshGroup.add(fillMesh, wireMesh);
+        meshGroup.visible = showMesh;
+        scene.add(meshGroup);
+        disposables.push(mGeo, fillMat, wireMat);
+
+        // ---- floor grid, centered + sized on the real scan's footprint ----
+        const floorSize = Math.max(40, sceneData.R * 2.2);
+        const floor = new THREE.GridHelper(floorSize, 24, 0x22404a, 0x152128);
+        floor.position.set(sceneData.cx, sceneData.minY - 0.05, sceneData.cz);
+        floor.material.transparent = true;
+        floor.material.opacity = 0.45;
+        scene.add(floor);
+        disposables.push(floor.geometry, floor.material);
+
+        // ---- radar sweep, centered on the sensor origin ----
+        const sweepGeo = buildSweepGeometry(sceneData.R * 1.05, 32, Math.PI / 4.2);
+        const sweepMat = new THREE.MeshBasicMaterial({
+          vertexColors: true, transparent: true, opacity: 0.5,
+          blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+        });
+        const sweepMesh = new THREE.Mesh(sweepGeo, sweepMat);
+        sweepMesh.position.set(0, sceneData.minY + 0.02, 0);
+        sweepMesh.visible = showSweep;
+        scene.add(sweepMesh);
+        disposables.push(sweepGeo, sweepMat);
+
+        objRef.current = { ...objRef.current, points, meshGroup, sweepMesh, renderer, camera };
+
+        // ---- reframe the camera/controls onto the real scan's footprint ----
+        target.set(sceneData.cx, sceneData.minY + sceneData.maxH * 0.35, sceneData.cz);
+        radius = Math.max(24, sceneData.R * 1.15);
+        RADIUS_MIN = 8; RADIUS_MAX = Math.max(160, sceneData.R * 3);
+        initial = { azimuth, polar, radius, target: target.clone() };
+        objRef.current.reset = () => {
+          azimuth = initial.azimuth; polar = initial.polar; radius = initial.radius;
+          target.copy(initial.target);
+          updateCamera();
+        };
+        updateCamera();
+
+        setPointCount(sceneData.count);
+        setLoadState('loaded');
+      } catch (err) {
+        if (cancelled) return;
+        setLoadState('error');
+        setLoadError(err && err.message ? err.message : 'Failed to load scan');
+      }
+    })();
+
     return () => {
+      cancelled = true;
       cancelAnimationFrame(raf);
       ro.disconnect();
       mountEl.removeEventListener('pointerdown', onPointerDown);
@@ -511,14 +552,12 @@ export default function LidarPointCloud({
       window.removeEventListener('pointerup', onPointerUp);
       mountEl.removeEventListener('wheel', onWheel);
       mountEl.removeEventListener('contextmenu', onContextMenu);
-      pGeo.dispose(); pMat.dispose(); mGeo.dispose(); fillMat.dispose(); wireMat.dispose();
-      sweepGeo.dispose(); sweepMat.dispose();
-      floor.geometry.dispose(); floor.material.dispose();
+      disposables.forEach((d) => d.dispose && d.dispose());
       renderer.dispose();
       if (renderer.domElement.parentNode === mountEl) mountEl.removeChild(renderer.domElement);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pointCount]);
+  }, []);
 
   useEffect(() => { if (objRef.current.points) objRef.current.points.visible = showPoints; }, [showPoints]);
   useEffect(() => { if (objRef.current.meshGroup) objRef.current.meshGroup.visible = showMesh; }, [showMesh]);
@@ -557,12 +596,22 @@ export default function LidarPointCloud({
             boxShadow: '0 0 6px #8fe9df', animation: 'lidar-pulse 1.6s ease-in-out infinite',
           }} />
           <span style={{ color: '#e7edf0', fontSize: 12, fontWeight: 600, letterSpacing: '0.12em' }}>
-            LIDAR SCAN // SECTOR-07
+            LIDAR SCAN // 000008.BIN
           </span>
         </div>
         <div style={{ color: '#5c6b73' }}>POINTS &nbsp;<span style={{ color: '#c9d3d9' }}>{pointCount.toLocaleString()}</span></div>
         <div style={{ color: '#5c6b73' }}>FPS &nbsp;&nbsp;&nbsp;&nbsp;<span ref={fpsRef} style={{ color: '#c9d3d9' }}>--</span></div>
-        <div style={{ color: '#5c6b73' }}>STATUS &nbsp;<span style={{ color: '#8fe9df' }}>{ready ? 'ACTIVE' : 'INIT'}</span></div>
+        <div style={{ color: '#5c6b73' }}>
+          STATUS &nbsp;
+          <span style={{ color: loadState === 'error' ? '#e8a39c' : '#8fe9df' }}>
+            {loadState === 'loading' ? 'FETCHING SCAN…' : loadState === 'error' ? 'LOAD FAILED' : (ready ? 'ACTIVE' : 'INIT')}
+          </span>
+        </div>
+        {loadState === 'error' && (
+          <div style={{ color: '#e8a39c', marginTop: 4, fontSize: 9.5, maxWidth: 190, lineHeight: 1.5 }}>
+            {loadError || 'Could not fetch 000008.bin'}
+          </div>
+        )}
         <div ref={hudAngleRef} style={{ color: '#455158', marginTop: 6, fontSize: 10 }}>AZ 000\u00B0 \u00B7 TILT 0\u00B0 \u00B7 DIST 0M</div>
       </div>
 
