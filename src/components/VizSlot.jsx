@@ -85,6 +85,165 @@ function parseVelodyneBin(buffer) {
   };
 }
 
+/* ------------------------------------------------------------------ */
+/* Text Parsers (Ported from HTML/JS version)                         */
+/* ------------------------------------------------------------------ */
+function tryFloat(s) { const v = parseFloat(s); return Number.isFinite(v) ? v : null; }
+
+function parseDelimited(text, limit) {
+  const pts = [];
+  const lines = text.split(/\r?\n/);
+  for (let li = 0; li < lines.length; li++) {
+    const line = lines[li].trim();
+    if (!line) continue;
+    const tokens = line.split(/[\s,;]+/);
+    const x = tryFloat(tokens[0]), y = tryFloat(tokens[1]), z = tryFloat(tokens[2]);
+    if (x === null || y === null || z === null) continue;
+    let i = null;
+    if (tokens.length >= 4) {
+      const iv = tryFloat(tokens[3]);
+      if (iv !== null) i = iv > 1 ? Math.min(1, iv / 255) : iv;
+    }
+    pts.push({ x, y, z, i });
+    if (limit && pts.length >= limit) break;
+  }
+  return pts;
+}
+
+function parsePCD(text) {
+  const lines = text.split(/\r?\n/);
+  let dataIdx = -1, fields = ['x', 'y', 'z'];
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i].trim();
+    if (l.toUpperCase().startsWith('FIELDS')) fields = l.split(/\s+/).slice(1).map(s => s.toLowerCase());
+    if (l.toUpperCase().startsWith('DATA')) { dataIdx = i + 1; break; }
+  }
+  if (dataIdx === -1) return parseDelimited(text);
+  const xi = fields.indexOf('x'), yi = fields.indexOf('y'), zi = fields.indexOf('z');
+  let ii = fields.indexOf('intensity');
+  const pts = [];
+  for (let i = dataIdx; i < lines.length; i++) {
+    const l = lines[i].trim();
+    if (!l) continue;
+    const tk = l.split(/\s+/);
+    const x = tryFloat(tk[xi]), y = tryFloat(tk[yi]), z = tryFloat(tk[zi]);
+    if (x === null || y === null || z === null) continue;
+    let iv = null;
+    if (ii >= 0) { const raw = tryFloat(tk[ii]); if (raw !== null) iv = raw > 1 ? Math.min(1, raw / 255) : raw; }
+    pts.push({ x, y, z, i: iv });
+  }
+  return pts;
+}
+
+function parsePLY(text) {
+  const lines = text.split(/\r?\n/);
+  let headerEnd = -1, props = [];
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i].trim();
+    if (l.startsWith('property')) props.push(l.split(/\s+/).pop().toLowerCase());
+    if (l === 'end_header') { headerEnd = i + 1; break; }
+  }
+  if (headerEnd === -1) return parseDelimited(text);
+  const xi = props.indexOf('x'), yi = props.indexOf('y'), zi = props.indexOf('z');
+  let ii = props.indexOf('intensity');
+  const pts = [];
+  for (let i = headerEnd; i < lines.length; i++) {
+    const l = lines[i].trim();
+    if (!l) continue;
+    const tk = l.split(/\s+/);
+    const x = tryFloat(tk[xi]), y = tryFloat(tk[yi]), z = tryFloat(tk[zi]);
+    if (x === null || y === null || z === null) continue;
+    let iv = null;
+    if (ii >= 0) { const raw = tryFloat(tk[ii]); if (raw !== null) iv = raw > 1 ? Math.min(1, raw / 255) : raw; }
+    pts.push({ x, y, z, i: iv });
+  }
+  return pts;
+}
+
+function parseJSONPoints(text) {
+  const data = JSON.parse(text);
+  const arr = Array.isArray(data) ? data : (data.points || []);
+  const pts = [];
+  for (const p of arr) {
+    if (Array.isArray(p)) {
+      if (p.length >= 3) pts.push({ x: p[0], y: p[1], z: p[2], i: p.length >= 4 ? (p[3] > 1 ? p[3] / 255 : p[3]) : null });
+    } else if (p && typeof p === 'object') {
+      if (p.x !== undefined && p.y !== undefined && p.z !== undefined) {
+        let iv = p.intensity !== undefined ? p.intensity : (p.i !== undefined ? p.i : null);
+        if (iv !== null && iv > 1) iv = iv / 255;
+        pts.push({ x: p.x, y: p.y, z: p.z, i: iv });
+      }
+    }
+  }
+  return pts;
+}
+
+function ptsToScan(pts) {
+  const count = pts.length;
+  const positions = new Float32Array(count * 3);
+  const rawIntensity = new Float32Array(count);
+  let minX = Infinity, maxX = -Infinity;
+  let minY = Infinity, maxY = -Infinity;
+  let minZ = Infinity, maxZ = -Infinity;
+
+  for (let i = 0; i < count; i++) {
+    const p = pts[i];
+    positions[i * 3] = p.x;
+    positions[i * 3 + 1] = p.y;
+    positions[i * 3 + 2] = p.z;
+    rawIntensity[i] = p.i || 0;
+    if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x;
+    if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y;
+    if (p.z < minZ) minZ = p.z; if (p.z > maxZ) maxZ = p.z;
+  }
+  return { positions, rawIntensity, count, bounds: { minX, maxX, minY, maxY, minZ, maxZ } };
+}
+
+function generateDemoScan() {
+  const pts = [];
+  // ground plane, gentle undulation
+  for (let i = 0; i < 38000; i++) {
+    const x = (Math.random() - 0.5) * 180;
+    const z = (Math.random() - 0.5) * 180;
+    const y = Math.sin(x * 0.05) * 0.6 + Math.cos(z * 0.05) * 0.4 + (Math.random() - 0.5) * 0.15;
+    pts.push({ x, y, z, i: 0.15 + Math.random() * 0.1 });
+  }
+  // a curving "road" strip
+  for (let i = 0; i < 9000; i++) {
+    const t = Math.random() * 160 - 80;
+    const curve = Math.sin(t * 0.03) * 10;
+    const x = curve + (Math.random() - 0.5) * 7;
+    const z = t;
+    pts.push({ x, y: 0.02 + Math.random() * 0.03, z, i: 0.5 + Math.random() * 0.2 });
+  }
+  // buildings
+  const buildings = [
+    { x: -30, z: -20, w: 14, d: 10, h: 22 },
+    { x: -30, z: 5, w: 10, d: 16, h: 14 },
+    { x: 25, z: -15, w: 16, d: 12, h: 30 },
+    { x: 34, z: 20, w: 9, d: 9, h: 11 },
+    { x: -10, z: -45, w: 20, d: 8, h: 9 },
+  ];
+  for (const b of buildings) {
+    for (let i = 0; i < 3200; i++) {
+      const face = Math.floor(Math.random() * 4);
+      let x, z;
+      const h = Math.random() * b.h;
+      if (face === 0) { x = b.x - b.w / 2; z = b.z + (Math.random() - 0.5) * b.d; }
+      else if (face === 1) { x = b.x + b.w / 2; z = b.z + (Math.random() - 0.5) * b.d; }
+      else if (face === 2) { x = b.x + (Math.random() - 0.5) * b.w; z = b.z - b.d / 2; }
+      else { x = b.x + (Math.random() - 0.5) * b.w; z = b.z + b.d / 2; }
+      pts.push({ x, y: h, z, i: 0.35 + (h / b.h) * 0.35 });
+    }
+    for (let i = 0; i < 400; i++) {
+      const x = b.x + (Math.random() - 0.5) * b.w;
+      const z = b.z + (Math.random() - 0.5) * b.d;
+      pts.push({ x, y: b.h, z, i: 0.6 });
+    }
+  }
+  return ptsToScan(pts);
+}
+
 function buildSceneDataFromScan(scan) {
   const { positions, rawIntensity, count, bounds } = scan;
   const colors = new Float32Array(count * 3);
@@ -286,6 +445,7 @@ export default function LidarPointCloud({ height = '100vh' }) {
   const objRef = useRef({});
   const hudAngleRef = useRef(null);
   const fpsRef = useRef(null);
+  const fileInputRef = useRef(null);
   const [showPoints, setShowPoints] = useState(true);
   const [showMesh, setShowMesh] = useState(false);
   const [autoRotate, setAutoRotate] = useState(false);
@@ -293,8 +453,9 @@ export default function LidarPointCloud({ height = '100vh' }) {
   const [pointCount, setPointCount] = useState(0);
   const [loadState, setLoadState] = useState('loading');
   const [loadError, setLoadError] = useState('');
-  const [pointScale, setPointScale] = useState(0.3); // smaller default
+  const [pointScale, setPointScale] = useState(0.3);
   const [colorMode, setColorMode] = useState('height');
+  const [isDragOver, setIsDragOver] = useState(false);
   const autoRotateRef = useRef(autoRotate);
 
   useEffect(() => {
@@ -465,6 +626,66 @@ export default function LidarPointCloud({ height = '100vh' }) {
     mountEl.addEventListener('wheel', onWheel, { passive: false });
     mountEl.addEventListener('contextmenu', onContextMenu);
 
+    // ---- Keyboard controls ----
+    const keyMap = {
+      w: false,
+      a: false,
+      s: false,
+      d: false,
+      q: false,
+      e: false,
+      arrowup: false,
+      arrowdown: false,
+      arrowleft: false,
+      arrowright: false,
+      shift: false,
+    };
+
+    const onKeyDown = (e) => {
+      const key = e.key.toLowerCase();
+      // Ignore if typing in input/select/textarea
+      if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA')) {
+        return;
+      }
+      // Map arrow keys
+      let mappedKey = key;
+      if (e.key.startsWith('Arrow')) {
+        mappedKey = e.key.toLowerCase();
+      }
+      if (mappedKey in keyMap) {
+        e.preventDefault();
+        keyMap[mappedKey] = true;
+      }
+      // Shift
+      if (e.key === 'Shift') {
+        keyMap.shift = true;
+        e.preventDefault();
+      }
+    };
+
+    const onKeyUp = (e) => {
+      const key = e.key.toLowerCase();
+      if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA')) {
+        return;
+      }
+      let mappedKey = key;
+      if (e.key.startsWith('Arrow')) {
+        mappedKey = e.key.toLowerCase();
+      }
+      if (mappedKey in keyMap) {
+        e.preventDefault();
+        keyMap[mappedKey] = false;
+      }
+      if (e.key === 'Shift') {
+        keyMap.shift = false;
+        e.preventDefault();
+      }
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKeyUp);
+
+    // ---- Resize ----
     function resize() {
       const w = mountEl.clientWidth,
         h = mountEl.clientHeight;
@@ -477,6 +698,7 @@ export default function LidarPointCloud({ height = '100vh' }) {
     const ro = new ResizeObserver(resize);
     ro.observe(mountEl);
 
+    // ---- Animation loop ----
     let raf;
     let lastTime = performance.now();
     let frameCount = 0,
@@ -487,7 +709,51 @@ export default function LidarPointCloud({ height = '100vh' }) {
       const delta = Math.min(0.05, (now - lastTime) / 1000);
       lastTime = now;
 
+      // Auto-rotate
       if (autoRotateRef.current) azimuth += delta * 0.14;
+
+      // ---- Keyboard pan (WASD + Q/E) ----
+      const fwd = screenForward();
+      const right = screenRight();
+      const speed = radius * 0.08;
+      const shift = keyMap.shift ? 2.5 : 1.0;
+      const s = speed * shift;
+
+      // WASD panning
+      if (keyMap.w) target.addScaledVector(fwd, s * delta);
+      if (keyMap.s) target.addScaledVector(fwd, -s * delta);
+      if (keyMap.d) target.addScaledVector(right, -s * delta);
+      if (keyMap.a) target.addScaledVector(right, s * delta);
+      if (keyMap.q) target.y += s * delta;
+      if (keyMap.e) target.y -= s * delta;
+
+    // ---- Arrow keys: Look around (First-person turn) ----
+      let didLook = false;
+      let dAzimuth = 0;
+      let dPolar = 0;
+      const turnSpeed = 1.8;
+
+      if (keyMap.arrowleft) { dAzimuth += turnSpeed * delta; didLook = true; }
+      if (keyMap.arrowright) { dAzimuth -= turnSpeed * delta; didLook = true; }
+      if (keyMap.arrowup) { dPolar += turnSpeed * delta; didLook = true; }
+      if (keyMap.arrowdown) { dPolar -= turnSpeed * delta; didLook = true; }
+
+      if (didLook) {
+        // 1. Capture current camera position before changing angles
+        const cx = target.x + radius * Math.sin(polar) * Math.sin(azimuth);
+        const cy = target.y + radius * Math.cos(polar);
+        const cz = target.z + radius * Math.sin(polar) * Math.cos(azimuth);
+
+        // 2. Update the view angles
+        azimuth += dAzimuth;
+        polar = Math.min(POLAR_MAX, Math.max(POLAR_MIN, polar + dPolar));
+
+        // 3. Shift the target to match the new look direction while keeping the camera pinned
+        target.x = cx - radius * Math.sin(polar) * Math.sin(azimuth);
+        target.y = cy - radius * Math.cos(polar);
+        target.z = cz - radius * Math.sin(polar) * Math.cos(azimuth);
+      }
+
       updateCamera();
 
       renderer.render(scene, camera);
@@ -508,13 +774,49 @@ export default function LidarPointCloud({ height = '100vh' }) {
     raf = requestAnimationFrame(animate);
     setReady(true);
 
-    // ---- fetch scan and build scene ----
     const disposables = [];
     let pointsObj = null,
       meshGroup = null,
-      pointMaterial = null;
-    let sceneDataRef = null;
+      pointMaterial = null,
+      floorObj = null;
 
+    objRef.current.updateScene = (scan) => {
+      const sceneData = buildSceneDataFromScan(scan);
+      objRef.current.sceneData = sceneData;
+      
+      // Points Update
+      if (objRef.current.pointGeometry) {
+        objRef.current.pointGeometry.setAttribute('position', new THREE.BufferAttribute(sceneData.positions, 3));
+        objRef.current.pointGeometry.setAttribute('size', new THREE.BufferAttribute(sceneData.sizes, 1));
+      }
+      
+      // Hazy Mesh Update
+      if (objRef.current.meshGroup) {
+        const grid = buildHazyGrid(sceneData, 56);
+        const mGeo = objRef.current.meshGroup.children[0].geometry;
+        mGeo.setAttribute('position', new THREE.BufferAttribute(grid.gridPositions, 3));
+        mGeo.setAttribute('color', new THREE.BufferAttribute(grid.gridColors, 3));
+        mGeo.setIndex(grid.indices);
+      }
+
+      // Floor Update
+      if (floorObj) {
+        floorObj.position.set(sceneData.cx, sceneData.minY - 0.05, sceneData.cz);
+      }
+
+      // Camera Reframe
+      target.set(sceneData.cx, sceneData.minY + sceneData.maxH * 0.35, sceneData.cz);
+      radius = Math.max(24, sceneData.R * 1.15);
+      RADIUS_MIN = 8;
+      RADIUS_MAX = Math.max(160, sceneData.R * 3);
+      initial = { azimuth, polar, radius, target: target.clone() };
+      objRef.current.reset();
+
+      if (rebuildColorsRef.current) rebuildColorsRef.current();
+      setPointCount(sceneData.count);
+    };
+
+    // ---- Fetch initial scan and build scene ----
     (async () => {
       try {
         const buffer = await fetchScanBuffer(SCAN_URL);
@@ -522,13 +824,11 @@ export default function LidarPointCloud({ height = '100vh' }) {
 
         const scan = parseVelodyneBin(buffer);
         const sceneData = buildSceneDataFromScan(scan);
-        sceneDataRef = sceneData;
         const grid = buildHazyGrid(sceneData, 56);
 
         // ---- points ----
         const pGeo = new THREE.BufferGeometry();
         pGeo.setAttribute('position', new THREE.BufferAttribute(sceneData.positions, 3));
-        // initial colors (height)
         const colors = new Float32Array(sceneData.count * 3);
         const tmp = new THREE.Color();
         const yRange = Math.max(1e-6, sceneData.bounds.maxY - sceneData.bounds.minY);
@@ -590,12 +890,12 @@ export default function LidarPointCloud({ height = '100vh' }) {
 
         // ---- floor grid ----
         const floorSize = Math.max(40, sceneData.R * 2.2);
-        const floor = new THREE.GridHelper(floorSize, 24, 0x22404a, 0x152128);
-        floor.position.set(sceneData.cx, sceneData.minY - 0.05, sceneData.cz);
-        floor.material.transparent = true;
-        floor.material.opacity = 0.45;
-        scene.add(floor);
-        disposables.push(floor.geometry, floor.material);
+        floorObj = new THREE.GridHelper(floorSize, 24, 0x22404a, 0x152128);
+        floorObj.position.set(sceneData.cx, sceneData.minY - 0.05, sceneData.cz);
+        floorObj.material.transparent = true;
+        floorObj.material.opacity = 0.45;
+        scene.add(floorObj);
+        disposables.push(floorObj.geometry, floorObj.material);
 
         // ---- reframe camera ----
         target.set(sceneData.cx, sceneData.minY + sceneData.maxH * 0.35, sceneData.cz);
@@ -603,19 +903,11 @@ export default function LidarPointCloud({ height = '100vh' }) {
         RADIUS_MIN = 8;
         RADIUS_MAX = Math.max(160, sceneData.R * 3);
         initial = { azimuth, polar, radius, target: target.clone() };
-        objRef.current.reset = () => {
-          azimuth = initial.azimuth;
-          polar = initial.polar;
-          radius = initial.radius;
-          target.copy(initial.target);
-          updateCamera();
-        };
-        updateCamera();
+        objRef.current.reset();
 
         setPointCount(sceneData.count);
         setLoadState('loaded');
 
-        // Store refs for later updates
         objRef.current.points = pointsObj;
         objRef.current.meshGroup = meshGroup;
         objRef.current.renderer = renderer;
@@ -626,9 +918,9 @@ export default function LidarPointCloud({ height = '100vh' }) {
 
         // ---- rebuild colors function ----
         rebuildColorsRef.current = () => {
-          if (!pointsObj || !sceneData) return;
+          if (!pointsObj || !objRef.current.sceneData) return;
           const geo = pointsObj.geometry;
-          const { positions, rawIntensity, bounds, count } = sceneData;
+          const { positions, rawIntensity, bounds, count } = objRef.current.sceneData;
           const newColors = new Float32Array(count * 3);
           const tmp = new THREE.Color();
           const yRange = Math.max(1e-6, bounds.maxY - bounds.minY);
@@ -652,8 +944,6 @@ export default function LidarPointCloud({ height = '100vh' }) {
           geo.setAttribute('color', new THREE.BufferAttribute(newColors, 3));
           geo.attributes.color.needsUpdate = true;
         };
-
-        // Run once to ensure initial colors match (though already height)
         rebuildColorsRef.current();
 
       } catch (err) {
@@ -672,6 +962,8 @@ export default function LidarPointCloud({ height = '100vh' }) {
       window.removeEventListener('pointerup', onPointerUp);
       mountEl.removeEventListener('wheel', onWheel);
       mountEl.removeEventListener('contextmenu', onContextMenu);
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keyup', onKeyUp);
       disposables.forEach((d) => d.dispose && d.dispose());
       renderer.dispose();
       if (renderer.domElement.parentNode === mountEl) mountEl.removeChild(renderer.domElement);
@@ -695,8 +987,72 @@ export default function LidarPointCloud({ height = '100vh' }) {
     if (objRef.current.meshGroup) objRef.current.meshGroup.visible = showMesh;
   }, [showMesh]);
 
+  const handleDragOver = (e) => { e.preventDefault(); setIsDragOver(true); };
+  const handleDragLeave = (e) => { e.preventDefault(); setIsDragOver(false); };
+  const handleDrop = (e) => {
+    e.preventDefault();
+    setIsDragOver(false);
+    const file = e.dataTransfer.files[0];
+    if (file) processFile(file);
+  };
+  const handleFileChange = (e) => {
+    const file = e.target.files[0];
+    if (file) processFile(file);
+  };
+
+  const processFile = (file) => {
+    setLoadState('loading');
+    const ext = (file.name.split('.').pop() || '').toLowerCase();
+    const reader = new FileReader();
+    reader.onerror = () => { setLoadState('error'); setLoadError('Failed to read file'); };
+    if (ext === 'bin') {
+      reader.onload = () => {
+        try {
+          const scan = parseVelodyneBin(reader.result);
+          objRef.current.updateScene(scan);
+          setLoadState('loaded');
+        } catch (err) {
+          setLoadState('error'); setLoadError(err.message);
+        }
+      };
+      reader.readAsArrayBuffer(file);
+    } else {
+      reader.onload = () => {
+        try {
+          let pts = [];
+          if (ext === 'pcd') pts = parsePCD(reader.result);
+          else if (ext === 'ply') pts = parsePLY(reader.result);
+          else if (ext === 'json') pts = parseJSONPoints(reader.result);
+          else pts = parseDelimited(reader.result);
+          const scan = ptsToScan(pts);
+          objRef.current.updateScene(scan);
+          setLoadState('loaded');
+        } catch (err) {
+          setLoadState('error'); setLoadError(err.message);
+        }
+      };
+      reader.readAsText(file);
+    }
+  };
+
+  const loadDemo = () => {
+    setLoadState('loading');
+    setTimeout(() => {
+      try {
+        const scan = generateDemoScan();
+        objRef.current.updateScene(scan);
+        setLoadState('loaded');
+      } catch(err) {
+        setLoadState('error'); setLoadError(err.message);
+      }
+    }, 50);
+  };
+
   return (
     <div
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
       style={{
         position: 'relative',
         width: '100%',
@@ -776,6 +1132,50 @@ export default function LidarPointCloud({ height = '100vh' }) {
         .control-label span:last-child {
           color: #8fe9df;
         }
+        .drop-zone {
+          border: 1px dashed rgba(140,190,200,0.4);
+          border-radius: 2px;
+          padding: 14px 10px;
+          text-align: center;
+          cursor: pointer;
+          transition: all 0.15s;
+        }
+        .drop-zone:hover, .drop-zone.dragover {
+          border-color: #8fe9df;
+          background: rgba(143,233,223,0.14);
+        }
+        .drop-zone .lbl {
+          font-size: 11px;
+          color: #c9d3d9;
+          letter-spacing: 0.02em;
+        }
+        .drop-zone .hint {
+          font-size: 9.5px;
+          color: #5c6b73;
+          margin-top: 3px;
+        }
+        .section-label {
+          font-size: 9.5px;
+          letter-spacing: 0.14em;
+          color: #5c6b73;
+          margin-bottom: 6px;
+          text-transform: uppercase;
+        }
+        .btn-primary {
+          background: rgba(143,233,223,0.1);
+          border: 1px solid rgba(143,233,223,0.4);
+          color: #8fe9df;
+          cursor: pointer;
+          padding: 7px 10px;
+          font-size: 10px;
+          text-transform: uppercase;
+          width: 100%;
+          transition: all 0.15s;
+          font-family: inherit;
+        }
+        .btn-primary:hover {
+          background: rgba(143,233,223,0.2);
+        }
       `}</style>
 
       <div ref={mountRef} style={{ position: 'absolute', inset: 0 }} />
@@ -796,7 +1196,7 @@ export default function LidarPointCloud({ height = '100vh' }) {
             }}
           />
           <span style={{ color: '#e7edf0', fontSize: 12, fontWeight: 600, letterSpacing: '0.12em' }}>
-            LIDAR SCAN // 000008.BIN
+            LIDAR SCAN VIEWER
           </span>
         </div>
         <div style={{ color: '#5c6b73' }}>
@@ -819,7 +1219,7 @@ export default function LidarPointCloud({ height = '100vh' }) {
         </div>
         {loadState === 'error' && (
           <div style={{ color: '#e8a39c', marginTop: 4, fontSize: 9.5, maxWidth: 190, lineHeight: 1.5 }}>
-            {loadError || 'Could not fetch 000008.bin'}
+            {loadError || 'Could not fetch data'}
           </div>
         )}
         <div ref={hudAngleRef} style={{ color: '#455158', marginTop: 6, fontSize: 10 }}>
@@ -836,10 +1236,34 @@ export default function LidarPointCloud({ height = '100vh' }) {
           ...panel,
           display: 'flex',
           flexDirection: 'column',
-          gap: 10,
-          minWidth: 150,
+          gap: 12,
+          minWidth: 200,
         }}
       >
+        {/* Dataset Panel Ported from HTML */}
+        <div>
+          <div className="section-label">Dataset</div>
+          <div 
+            className={`drop-zone ${isDragOver ? 'dragover' : ''}`}
+            onClick={() => fileInputRef.current && fileInputRef.current.click()}
+          >
+            <div className="lbl">Drop file or click to browse</div>
+            <div className="hint">.bin · .xyz · .csv · .txt · .pcd · .ply · .json</div>
+          </div>
+          <input 
+            type="file" 
+            ref={fileInputRef}
+            style={{ display: 'none' }} 
+            accept=".xyz,.csv,.txt,.pcd,.ply,.json,.bin"
+            onChange={handleFileChange}
+          />
+          <div style={{ marginTop: 8 }}>
+            <button className="btn-primary" onClick={loadDemo}>Load demo scan</button>
+          </div>
+        </div>
+
+        <div style={{ height: 1, background: 'rgba(140,190,200,0.1)' }}></div>
+
         {/* Legend */}
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
           <span style={{ color: '#5c6b73', fontSize: 9 }}>HIGH</span>
@@ -860,6 +1284,7 @@ export default function LidarPointCloud({ height = '100vh' }) {
 
         {/* Controls */}
         <div style={{ borderTop: '1px solid rgba(140,190,200,0.1)', paddingTop: 8 }}>
+          <div className="section-label" style={{ marginBottom: 4 }}>Display</div>
           <div className="control-group">
             <div className="control-label">
               <span>Point Size</span>
@@ -887,7 +1312,7 @@ export default function LidarPointCloud({ height = '100vh' }) {
         </div>
       </div>
 
-      {/* bottom-left: controls legend */}
+      {/* bottom-left: controls legend (updated) */}
       <div style={{ position: 'absolute', bottom: 16, left: 16, ...panel }}>
         <div style={{ color: '#5c6b73', marginBottom: 2 }}>
           DRAG &nbsp;<span style={{ color: '#8a9aa2' }}>— PAN</span>
@@ -895,8 +1320,20 @@ export default function LidarPointCloud({ height = '100vh' }) {
         <div style={{ color: '#5c6b73', marginBottom: 2 }}>
           SHIFT+DRAG / R-CLICK &nbsp;<span style={{ color: '#8a9aa2' }}>— ORBIT</span>
         </div>
-        <div style={{ color: '#5c6b73' }}>
+        <div style={{ color: '#5c6b73', marginBottom: 2 }}>
           SCROLL / PINCH &nbsp;<span style={{ color: '#8a9aa2' }}>— ZOOM</span>
+        </div>
+        <div style={{ color: '#5c6b73', marginBottom: 2 }}>
+          WASD &nbsp;<span style={{ color: '#8a9aa2' }}>— PAN (FAST)</span>
+        </div>
+        <div style={{ color: '#5c6b73', marginBottom: 2 }}>
+          Q / E &nbsp;<span style={{ color: '#8a9aa2' }}>— UP / DOWN</span>
+        </div>
+        <div style={{ color: '#5c6b73', marginBottom: 2 }}>
+          ARROWS &nbsp;<span style={{ color: '#8a9aa2' }}>— ORBIT (TURN)</span>
+        </div>
+        <div style={{ color: '#5c6b73' }}>
+          SHIFT &nbsp;<span style={{ color: '#8a9aa2' }}>— SPRINT (2.5× speed)</span>
         </div>
       </div>
 
