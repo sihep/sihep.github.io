@@ -1176,6 +1176,12 @@ export default function LidarPointCloud({ height = '100vh' }) {
         .btn-primary:hover {
           background: rgba(143,233,223,0.2);
         }
+        /* Hide UI panels on small screens */
+        @media (max-width: 768px) {
+          .lidar-ui-panel {
+            display: none !important;
+          }
+        }
       `}</style>
 
       <div ref={mountRef} style={{ position: 'absolute', inset: 0 }} />
@@ -1183,7 +1189,7 @@ export default function LidarPointCloud({ height = '100vh' }) {
       <div className="lidar-vignette" />
 
       {/* top-left: title / status */}
-      <div style={{ position: 'absolute', top: 16, left: 16, ...panel, minWidth: 210 }}>
+      <div className="lidar-ui-panel" style={{ position: 'absolute', top: 16, left: 16, ...panel, minWidth: 210 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 6 }}>
           <span
             style={{
@@ -1229,6 +1235,7 @@ export default function LidarPointCloud({ height = '100vh' }) {
 
       {/* top-right: controls + legend */}
       <div
+        className="lidar-ui-panel"
         style={{
           position: 'absolute',
           top: 16,
@@ -1313,7 +1320,7 @@ export default function LidarPointCloud({ height = '100vh' }) {
       </div>
 
       {/* bottom-left: controls legend (updated) */}
-      <div style={{ position: 'absolute', bottom: 16, left: 16, ...panel }}>
+      <div className="lidar-ui-panel" style={{ position: 'absolute', bottom: 16, left: 16, ...panel }}>
         <div style={{ color: '#5c6b73', marginBottom: 2 }}>
           DRAG &nbsp;<span style={{ color: '#8a9aa2' }}>— PAN</span>
         </div>
@@ -1339,6 +1346,7 @@ export default function LidarPointCloud({ height = '100vh' }) {
 
       {/* bottom-right: toggles */}
       <div
+        className="lidar-ui-panel"
         style={{
           position: 'absolute',
           bottom: 16,
